@@ -6,7 +6,7 @@
 #include <SPI.h>
 #include <time.h>
 
-// 网络和时间参数
+// WIFI和时间参数
 // 此前到后分别是month-day-hour-minute-是否成功获取时间
 uint8_t timeArr[9] = {};
 // 上一次同步的时间
@@ -38,6 +38,10 @@ void startWiFiConnect();
 void wifiTask();
 
 // 驱动参数
+// 转完一圈需要的脉冲数
+#define PULSE_COUNT 4096
+// 每移动一个字符所需要的脉冲数 4096 / 45
+#define PULSE_CHAR 91
 // 显示位的数量
 #define MOTOR_COUNT 5
 // 每个模块显示字符的翻牌数
@@ -49,22 +53,36 @@ void wifiTask();
 #define PIN_CS 5    // 共用 CS
 SPIClass vspi(VSPI);
 // 步进电机半步表
-const uint8_t stepTable[8] = {0b1000, 0b1100, 0b0100, 0b0110, 0b0010, 0b0011, 0b0001, 0b1001};
+// const uint8_t stepTable[8] = {0b1000, 0b1100, 0b0100, 0b0110, 0b0010, 0b0011, 0b0001, 0b1001};
+const uint8_t stepTable[8] = {0b1001, 0b0001, 0b0011, 0b0010, 0b0110, 0b0100, 0b1100, 0b1000};
 // 步进电机在电路板上74HC595的对照表
 // const uint8_t motorTable[5][4] = {{7, 6, 5, 4}, {3, 2, 1, 15}, {14, 13, 12, 11}, {10, 9, 22, 21}, {20, 19, 18, 17}};
 const uint8_t motorTable[5][4] = {{7, 6, 5, 4}, {3, 2, 1, 15}, {14, 13, 12, 11}, {10, 9, 22, 21}, {20, 19, 18, 17}};
+// 每个脉冲之间delay的时长
+uint8_t motorSpeed = 1;
 // 电机状态
 uint8_t motorStep[MOTOR_COUNT] = {0};
+// 当前展示的文本
+int8_t currentWords[MOTOR_COUNT] = {0};
+// 准备展示的文本
+int8_t comingWords[MOTOR_COUNT] = {0};
+// 各个模块移动到指定字符所需要的脉冲数
+int needPulse[MOTOR_COUNT] = {};
+bool motorEnable[MOTOR_COUNT] = {false};
 // 霍尔传感器状态
 bool hallSensor[MOTOR_COUNT] = {false};
-int motorChar[MOTOR_COUNT] = {0};
-bool motorEnable[MOTOR_COUNT] = {false};
 
+// 校准所有模块
+bool allCalibration();
+// 把线圈全部设为低电平，防止线圈持续通电，导致电机过热
+// FIXME: 置零以后，电机的状态需要倒退一位嘛
+void stopMotor();
+// 展示指定文本
+void showWords();
 // SPI：输出 595 + 读取 165（同一时钟）
 void spiTransfer();
 // 单步推进（同步）
 void stepOnce();
-
 // // 上电归零（霍尔校准）
 // void homeAllMotors()
 // {
@@ -136,33 +154,37 @@ void setup()
     pinMode(PIN_CS, OUTPUT);
     digitalWrite(PIN_CS, HIGH);
     vspi.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS);
-    for (int i = 0; i < MOTOR_COUNT; i++)
+    delay(500);
+    if (allCalibration())
     {
-        motorEnable[i] = true;
+        Serial.println("all motors calibration succeed");
+    }
+    else
+    {
+        while (true)
+            ;
     }
 }
-int cnt = 0;
+
 void loop()
 {
     // wifiTask();
     // getCurrentTime();
     // Serial.println("");
-    for (int i = 0; i < 2048; i++)
+    // FIXME: 升序不用加一，降序需要，可能是因为零点位置有变
+    int temp[4] = {1, 12, 9, 7}; // lhf
+    // int temp[4] = {1, 8, 11, 26};//hkz
+    // int temp[4] = {1,20,25,21};//tyt
+    // int temp[4] = {1, 12, 8, 24}; // lgw
+    for (int i = 0; i < 4; i++)
     {
-        cnt++;
-        stepOnce();
-        if (cnt % 500 == 0)
-        {
-            for (int j = 0; j < MOTOR_COUNT; j++)
-            {
-                Serial.printf("%d   ", hallSensor[j]);
-            }
-            Serial.println("");
-        }
-        
-        delay(3);
+        comingWords[0] = temp[i];
+        showWords();
+        Serial.println(i);
+        delay(5000);
     }
-    delay(1000);
+    Serial.println("finaly circle");
+    delay(20000);
 }
 
 void wifiTask()
@@ -242,6 +264,51 @@ void getCurrentTime()
     }
 }
 
+void showWords()
+{
+    // 计算各个模块移动到指定字符所需要的脉冲数
+    bool firstHall[MOTOR_COUNT];
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        firstHall[i] = false;
+        needPulse[i] = (comingWords[i] - currentWords[i] + CHAR_COUNT) % CHAR_COUNT;
+        needPulse[i] *= PULSE_CHAR;
+    }
+    // FIXME:可能存在无限循环，要想办法规避
+    while (needPulse[0] > 0 || needPulse[1] > 0 || needPulse[2] > 0 || needPulse[3] > 0 || needPulse[4] > 0)
+    {
+        for (int i = 0; i < MOTOR_COUNT; i++)
+        {
+            // FIXME: 如果在旋转的过程中检测到零点，需要重新计算脉冲数，以便校准
+            if (needPulse[i] > 0)
+            {
+                motorEnable[i] = true;
+                needPulse[i]--;
+            }
+            else
+            {
+                motorEnable[i] = false;
+            }
+        }
+        stepOnce();
+        // 检测是否有模块在移动的过程中检测到霍尔传感器，如果检测到，那就重新计算还需要多少次脉冲
+        // 但是一个模块只有第一次检测到霍尔传感器的时候才需要校验，下一次就不校验了(一个脉冲不足以让电机脱离霍尔传感器的检测)
+        for (int i = 0; i < MOTOR_COUNT; i++)
+        {
+            if (hallSensor[i] && firstHall[i] == false)
+            {
+                firstHall[i] = true;
+                needPulse[i] = (int)comingWords[i] * PULSE_CHAR;
+            }
+        }
+    }
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        currentWords[i] = comingWords[i];
+    }
+    stopMotor();
+}
+
 void spiTransfer()
 {
     uint32_t out = 0;
@@ -273,6 +340,7 @@ void spiTransfer()
     vspi.transfer((out >> 8) & 0xFF);
 
     vspi.transfer(out & 0xFF);
+    delay(motorSpeed);
     digitalWrite(PIN_CS, HIGH);
     hall = vspi.transfer(0);
     for (int i = 0; i < 4; i++)
@@ -295,5 +363,49 @@ void stepOnce()
         }
     }
 
+    spiTransfer();
+}
+
+bool allCalibration()
+{
+    int cnt = 0;
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        motorEnable[i] = true;
+    }
+    while (true)
+    {
+        cnt++;
+        // 转三圈还是解决不了直接退出
+        if (cnt > PULSE_COUNT * 3)
+        {
+            return false;
+        }
+        stepOnce();
+        // FIXME: 调试第一个电机而已
+        for (int i = 0; i < 1; i++)
+        {
+            if (hallSensor[i])
+            {
+                motorEnable[i] = false;
+            }
+        }
+        // FIXME:
+        // if (motorEnable[0] == false && motorEnable[1] == false && motorEnable[2] == false && motorEnable[3] == false && motorEnable[4] == false)
+        if (motorEnable[0] == false)
+        {
+            break;
+        }
+    }
+    stopMotor();
+    return true;
+}
+
+void stopMotor()
+{
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        motorEnable[i] = false;
+    }
     spiTransfer();
 }
