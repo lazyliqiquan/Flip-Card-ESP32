@@ -3,6 +3,10 @@
 代码思路是对的
 就是有些没有考虑到，
 【1】没有考虑电机不转动的时候，应该把控制线置为低电平，以免过热，记得记录上一步的状态，然后再置零
+【2】展示字符时：离原点比较近的字符容易被检测成原点，从而造成误差，因为每一圈都会检测是否经过原点来校准误差，下一步想要转动的字符，
+离远点太近，反而被误以为是原点，从而不再转动，解决方法，离远点较近的字符这一圈不进行校验，使用相对距离作为转动距离；
+或者可以多转一圈的距离，再次接触到原点的时候，磁铁就是在霍尔传感器的最右侧了
+【3】校准时：多转一圈，确保当前校准位是在霍尔传感器的最右侧，因为后续每一圈的校验都是以最右侧也就是第一次检测到磁铁的位置来作为原点的       
 */
 #include <WiFi.h>
 #include <SPI.h>
@@ -73,7 +77,8 @@ int needPulse[MOTOR_COUNT] = {};
 bool motorEnable[MOTOR_COUNT] = {false};
 // 霍尔传感器状态
 bool hallSensor[MOTOR_COUNT] = {false};
-
+// 由于安装霍尔传感器的时候需要手动掰弯元器件，所以难免会有误差，但是误差通常在一个字符之前，所以需要通过软件校准
+const int mistake[5] = {0, PULSE_CHAR - 50, 0, 0, -PULSE_CHAR + 50};
 // 校准所有模块
 bool allCalibration();
 // 把线圈全部设为低电平，防止线圈持续通电，导致电机过热
@@ -172,22 +177,21 @@ void loop()
 {
     // wifiTask();
     // getCurrentTime();
-    // Serial.println("");
-    // FIXME: 升序不用加一，降序需要，可能是因为零点位置有变
-    // int temp[4] = {0, 12, 8, 6}; // lhf
-    int temp[4] = {0, 16, 24, 12}; // lhf
-    // int temp[4] = {1, 8, 11, 26};//hkz
-    // int temp[4] = {1,20,25,21};//tyt
-    // int temp[4] = {1, 12, 8, 24}; // lgw
-    for (int i = 0; i < 4; i++)
+    int temp[3][5] = {{0, 0, 0, 0, 0}, {8, 5, 12, 12, 15}, {0, 2, 18, 15, 0}}; //
+    // 等下我发给你几个英文字母，你告诉我它们的位置，如a对应1，z对应26
+    for (int i = 0; i < 3; i++)
     {
-        comingWords[0] = temp[i];
+        for (int j = 0; j < 5; j++)
+        {
+            comingWords[j] = temp[i][5 - 1 - j];
+        }
+        Serial.printf("%d   %d  %d  %d  %d\n", currentWords[0], currentWords[1], currentWords[2], currentWords[3], currentWords[4]);
         showWords();
         Serial.println(i);
         delay(5000);
     }
     Serial.println("finaly circle");
-    delay(20000);
+    delay(120000);
 }
 
 void wifiTask()
@@ -296,14 +300,15 @@ void showWords()
         stepOnce();
         // 检测是否有模块在移动的过程中检测到霍尔传感器，如果检测到，那就重新计算还需要多少次脉冲
         // 但是一个模块只有第一次检测到霍尔传感器的时候才需要校验，下一次就不校验了(一个脉冲不足以让电机脱离霍尔传感器的检测)
-        for (int i = 0; i < MOTOR_COUNT; i++)
-        {
-            if (hallSensor[i] && firstHall[i] == false)
-            {
-                firstHall[i] = true;
-                needPulse[i] = (int)comingWords[i] * PULSE_CHAR;
-            }
-        }
+        // for (int i = 0; i < MOTOR_COUNT; i++)
+        // {
+        //     if (hallSensor[i] && firstHall[i] == false)
+        //     {
+        //         firstHall[i] = true;
+        //         // 消除误差
+        //         needPulse[i] = ((int)comingWords[i] * PULSE_CHAR - mistake[i] + PULSE_COUNT) % PULSE_COUNT;
+        //     }
+        // }
     }
     for (int i = 0; i < MOTOR_COUNT; i++)
     {
@@ -385,17 +390,48 @@ bool allCalibration()
             return false;
         }
         stepOnce();
-        // FIXME: 调试第一个电机而已
-        for (int i = 0; i < 1; i++)
+        for (int i = 0; i < MOTOR_COUNT; i++)
         {
+            // FIXME: 有一个问题，就是初始化校准的时候，某个模块的磁铁在霍尔传感器的左侧，会造成一个字符误差
+            //  最好还是转一段距离，从头开始校准
             if (hallSensor[i])
             {
                 motorEnable[i] = false;
             }
         }
-        // FIXME:
-        // if (motorEnable[0] == false && motorEnable[1] == false && motorEnable[2] == false && motorEnable[3] == false && motorEnable[4] == false)
-        if (motorEnable[0] == false)
+        if (motorEnable[0] == false && motorEnable[1] == false && motorEnable[2] == false && motorEnable[3] == false && motorEnable[4] == false)
+        {
+            break;
+        }
+    }
+    int temp[5] = {};
+    // 消除原点误差
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        temp[i] = (PULSE_COUNT - mistake[i] + PULSE_COUNT) % PULSE_COUNT;
+    }
+    Serial.printf("%d   %d  %d  %d  %d\n", temp[0], temp[1], temp[2], temp[3], temp[4]);
+    while (true)
+    {
+        bool flag = false;
+        for (int i = 0; i < MOTOR_COUNT; i++)
+        {
+            if (temp[i] > 0)
+            {
+                temp[i]--;
+                motorEnable[i] = true;
+                flag = true;
+            }
+            else
+            {
+                motorEnable[i] = false;
+            }
+        }
+        if (flag)
+        {
+            stepOnce();
+        }
+        else
         {
             break;
         }
