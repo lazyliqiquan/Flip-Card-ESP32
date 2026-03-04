@@ -1,12 +1,14 @@
 /*
 安装翻牌的顺序：原点就是0位点，往前数15个孔，就是空白翻牌上部分的安装位置
+注意：安装误差最好保证在一个字符之内
 代码思路是对的
 就是有些没有考虑到，
 【1】没有考虑电机不转动的时候，应该把控制线置为低电平，以免过热，记得记录上一步的状态，然后再置零
 【2】展示字符时：离原点比较近的字符容易被检测成原点，从而造成误差，因为每一圈都会检测是否经过原点来校准误差，下一步想要转动的字符，
 离远点太近，反而被误以为是原点，从而不再转动，解决方法，离远点较近的字符这一圈不进行校验，使用相对距离作为转动距离；
 或者可以多转一圈的距离，再次接触到原点的时候，磁铁就是在霍尔传感器的最右侧了
-【3】校准时：多转一圈，确保当前校准位是在霍尔传感器的最右侧，因为后续每一圈的校验都是以最右侧也就是第一次检测到磁铁的位置来作为原点的       
+【3】校准时：多转一圈，确保当前校准位是在霍尔传感器的最右侧，因为后续每一圈的校验都是以最右侧也就是第一次检测到磁铁的位置来作为原点的
+
 */
 #include <WiFi.h>
 #include <SPI.h>
@@ -78,7 +80,10 @@ bool motorEnable[MOTOR_COUNT] = {false};
 // 霍尔传感器状态
 bool hallSensor[MOTOR_COUNT] = {false};
 // 由于安装霍尔传感器的时候需要手动掰弯元器件，所以难免会有误差，但是误差通常在一个字符之前，所以需要通过软件校准
-const int mistake[5] = {0, PULSE_CHAR - 50, 0, 0, -PULSE_CHAR + 50};
+// 如果不知道怎么手动调整安装造成的误差，原点是0，负数表示前面的字符，正数表示后面即将显示的字符
+const int mistake[5] = {0, PULSE_CHAR - 30, 0, 0, -PULSE_CHAR + 30};
+// 霍尔传感器的检测范围，比如距离原点较近的字符，也有可能会被检测为原点
+const int hallScope = 5;
 // 校准所有模块
 bool allCalibration();
 // 把线圈全部设为低电平，防止线圈持续通电，导致电机过热
@@ -90,61 +95,6 @@ void showWords();
 void spiTransfer();
 // 单步推进（同步）
 void stepOnce();
-// // 上电归零（霍尔校准）
-// void homeAllMotors()
-// {
-//     memset(motorEnable, true, sizeof(motorEnable));
-//     while (true)
-//     {
-//         uint8_t hall = stepOnce();
-//         bool done = true;
-//         for (int i = 0; i < MOTOR_COUNT; i++)
-//         {
-//             if (hall & (1 << i))
-//             {
-//                 motorEnable[i] = false;
-//                 motorChar[i] = 0;
-//             }
-//             else
-//             {
-//                 done = false;
-//             }
-//         }
-//         delay(5);
-//         if (done)
-//             break;
-//     }
-//     // spiTransfer595_165(0); // 全断电
-// }
-// // 转到指定字符（含“每圈自动校准”）
-// // void moveToChar(int idx, int targetChar)
-// // {
-// //     int diff = (targetChar - motorChar[idx] + CHAR_COUNT) % CHAR_COUNT;
-// //     motorEnable[idx] = true;
-// //     for (int i = 0; i < diff; i++)
-// //     {
-// //         motorStep[idx] = (motorStep[idx] + 1) % 8;
-// //         spiTransfer595_165(buildMotorBits());
-// //         delay(5);
-// //         motorChar[idx]++;
-// //         if (motorChar[idx] >= CHAR_COUNT)
-// //         {
-// //             motorChar[idx] = 0;
-// //             // ===== 自动校准 =====
-// //             while (true)
-// //             {
-// //                 uint8_t hall = spiTransfer595_165(buildMotorBits());
-// //                 if (hall & (1 << idx))
-// //                     break;
-// //                 motorStep[idx] = (motorStep[idx] + 1) % 8;
-// //                 delay(5);
-// //             }
-// //         }
-// //     }
-// //     motorChar[idx] = targetChar;
-// //     motorEnable[idx] = false;
-// //     spiTransfer595_165(buildMotorBits());
-// // }
 
 void setup()
 {
@@ -177,7 +127,8 @@ void loop()
 {
     // wifiTask();
     // getCurrentTime();
-    int temp[3][5] = {{0, 0, 0, 0, 0}, {8, 5, 12, 12, 15}, {0, 2, 18, 15, 0}}; //
+    // int temp[3][5] = {{0, 0, 0, 0, 0}, {8, 5, 12, 12, 15}, {0, 2, 18, 15, 0}};
+    int temp[3][5] = {{0, 0, 0, 0, 0}, {8, 5, 12, 12, 15}, {13, 15, 21, 19, 5}}; 
     // 等下我发给你几个英文字母，你告诉我它们的位置，如a对应1，z对应26
     for (int i = 0; i < 3; i++)
     {
@@ -274,14 +225,19 @@ void getCurrentTime()
 void showWords()
 {
     // 计算各个模块移动到指定字符所需要的脉冲数
-    bool firstHall[MOTOR_COUNT];
+    bool firstHall[MOTOR_COUNT], initialHall[MOTOR_COUNT];
+    // 如果当前位置的磁铁能够被检测到，那么就不能将当前位置默认为原点，起码要转转动一定的距离后才得
+    const int minPulses = hallScope * PULSE_CHAR;
+    // 记录电机的转动脉冲数
+    int rotationalPulse[5];
     for (int i = 0; i < MOTOR_COUNT; i++)
     {
+        // 记录还没有开始转动的时候是不是就已经处于霍尔传感器的检测范围了，如果是，那么就不能将当前位置默认为原点，起码要转转动一定的距离后才得
         firstHall[i] = false;
-        needPulse[i] = (comingWords[i] - currentWords[i] + CHAR_COUNT) % CHAR_COUNT;
-        needPulse[i] *= PULSE_CHAR;
+        initialHall[i] = hallSensor[i];
+        needPulse[i] = (comingWords[i] - currentWords[i] + CHAR_COUNT) % CHAR_COUNT * PULSE_CHAR;
+        rotationalPulse[i] = 0;
     }
-    // FIXME:可能存在无限循环，要想办法规避
     while (needPulse[0] > 0 || needPulse[1] > 0 || needPulse[2] > 0 || needPulse[3] > 0 || needPulse[4] > 0)
     {
         for (int i = 0; i < MOTOR_COUNT; i++)
@@ -291,6 +247,7 @@ void showWords()
             {
                 motorEnable[i] = true;
                 needPulse[i]--;
+                rotationalPulse[i]++;
             }
             else
             {
@@ -300,15 +257,21 @@ void showWords()
         stepOnce();
         // 检测是否有模块在移动的过程中检测到霍尔传感器，如果检测到，那就重新计算还需要多少次脉冲
         // 但是一个模块只有第一次检测到霍尔传感器的时候才需要校验，下一次就不校验了(一个脉冲不足以让电机脱离霍尔传感器的检测)
-        // for (int i = 0; i < MOTOR_COUNT; i++)
-        // {
-        //     if (hallSensor[i] && firstHall[i] == false)
-        //     {
-        //         firstHall[i] = true;
-        //         // 消除误差
-        //         needPulse[i] = ((int)comingWords[i] * PULSE_CHAR - mistake[i] + PULSE_COUNT) % PULSE_COUNT;
-        //     }
-        // }
+        for (int i = 0; i < MOTOR_COUNT; i++)
+        {
+            // 检测到磁铁
+            if (hallSensor[i])
+            {
+                // 需要校准条件一：初始位置也检测到磁铁，但是已经转动了一定的距离
+                // 需要校准条件二：初始位置检测不到磁铁
+                if (((initialHall[i] && rotationalPulse[i] > minPulses) || initialHall[i] == false) && firstHall[i] == false)
+                {
+                    firstHall[i] = true;
+                    // 消除误差
+                    needPulse[i] = ((int)comingWords[i] * PULSE_CHAR - mistake[i] + PULSE_COUNT) % PULSE_COUNT;
+                }
+            }
+        }
     }
     for (int i = 0; i < MOTOR_COUNT; i++)
     {
@@ -374,41 +337,46 @@ void stepOnce()
     spiTransfer();
 }
 
+/*
+校准的时候有一个目标，就是霍尔传感器检测到磁铁的时候，磁铁最好在霍尔传感器的最右侧，就会减少造成的误差了，
+所以如果一开始就检测到磁铁，最好还是多转一圈，保证检测到磁铁的时候，是在霍尔传感器的最右侧
+*/
 bool allCalibration()
 {
+    int rotationalPulse[5];
     int cnt = 0;
+    // 至少要转动一定的距离以后检测到磁铁才能保证此时磁铁在霍尔传感器的最右侧
+    const int minPulses = hallScope * PULSE_CHAR;
     for (int i = 0; i < MOTOR_COUNT; i++)
     {
+        rotationalPulse[i] = 0;
         motorEnable[i] = true;
     }
-    while (true)
+    while (motorEnable[0] || motorEnable[1] || motorEnable[2] || motorEnable[3] || motorEnable[4])
     {
-        cnt++;
-        // 转三圈还是解决不了直接退出
-        if (cnt > PULSE_COUNT * 3)
-        {
-            return false;
-        }
-        stepOnce();
         for (int i = 0; i < MOTOR_COUNT; i++)
         {
-            // FIXME: 有一个问题，就是初始化校准的时候，某个模块的磁铁在霍尔传感器的左侧，会造成一个字符误差
+            // 有一个问题，就是初始化校准的时候，某个模块的磁铁在霍尔传感器的左侧，会造成误差
             //  最好还是转一段距离，从头开始校准
-            if (hallSensor[i])
+            if (hallSensor[i] && rotationalPulse[i] > minPulses)
             {
                 motorEnable[i] = false;
             }
+            rotationalPulse[i]++;
         }
-        if (motorEnable[0] == false && motorEnable[1] == false && motorEnable[2] == false && motorEnable[3] == false && motorEnable[4] == false)
+        stepOnce();
+        cnt++;
+        // 转三圈还是校准不了直接退出
+        if (cnt > PULSE_COUNT * 3)
         {
-            break;
+            return false;
         }
     }
     int temp[5] = {};
     // 消除原点误差
     for (int i = 0; i < MOTOR_COUNT; i++)
     {
-        temp[i] = (PULSE_COUNT - mistake[i] + PULSE_COUNT) % PULSE_COUNT;
+        temp[i] = (PULSE_COUNT - mistake[i]) % PULSE_COUNT;
     }
     Serial.printf("%d   %d  %d  %d  %d\n", temp[0], temp[1], temp[2], temp[3], temp[4]);
     while (true)
