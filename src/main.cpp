@@ -373,7 +373,7 @@ bool allCalibration()
         }
     }
     int temp[5] = {};
-    // 消除原点误差
+    // 消除原点误差，安装过程中无法避免的误差（掰霍尔传感器的时候手抖难免的）
     for (int i = 0; i < MOTOR_COUNT; i++)
     {
         temp[i] = (PULSE_COUNT - mistake[i]) % PULSE_COUNT;

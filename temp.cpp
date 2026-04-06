@@ -1,41 +1,26 @@
-/*代码思路是对的
+/*
+安装翻牌的顺序：原点就是0位点，往前数15个孔，就是空白翻牌上部分的安装位置
+注意：安装误差最好保证在一个字符之内
+代码思路是对的
 就是有些没有考虑到，
 【1】没有考虑电机不转动的时候，应该把控制线置为低电平，以免过热，记得记录上一步的状态，然后再置零
-*/
+【2】展示字符时：离原点比较近的字符容易被检测成原点，从而造成误差，因为每一圈都会检测是否经过原点来校准误差，下一步想要转动的字符，
+离远点太近，反而被误以为是原点，从而不再转动，解决方法，离远点较近的字符这一圈不进行校验，使用相对距离作为转动距离；
+或者可以多转一圈的距离，再次接触到原点的时候，磁铁就是在霍尔传感器的最右侧了
+【3】校准时：多转一圈，确保当前校准位是在霍尔传感器的最右侧，因为后续每一圈的校验都是以最右侧也就是第一次检测到磁铁的位置来作为原点的
 
+*/
 #include <WiFi.h>
 #include <SPI.h>
 #include <time.h>
 
-// 获取当前时间
+// WIFI和时间参数
 // 此前到后分别是month-day-hour-minute-是否成功获取时间
 uint8_t timeArr[9] = {};
 // 上一次同步的时间
 int lastSyncDay = -1;
 // 每天凌晨三点同步一次
 const int syncHour = 3;
-void getCurrentTime()
-{
-    struct tm timeinfo;
-    timeArr[8] = 0;
-    if (getLocalTime(&timeinfo))
-    {
-        timeArr[0] = (timeinfo.tm_mon + 1) / 10;
-        timeArr[1] = (timeinfo.tm_mon + 1) % 10;
-        timeArr[2] = timeinfo.tm_mday / 10;
-        timeArr[3] = timeinfo.tm_mday % 10;
-        timeArr[4] = timeinfo.tm_hour / 10;
-        timeArr[5] = timeinfo.tm_hour % 10;
-        timeArr[6] = timeinfo.tm_sec / 10;
-        timeArr[7] = timeinfo.tm_sec % 10;
-        timeArr[8] = 1;
-        if (timeinfo.tm_hour == syncHour && timeinfo.tm_mday != lastSyncDay)
-        {
-            lastSyncDay = timeinfo.tm_mday;
-        }
-    }
-}
-
 // WiFi的状态
 enum WiFiState
 {
@@ -44,39 +29,130 @@ enum WiFiState
     WIFI_CONNECTED,
     WIFI_WAIT_RETRY
 };
-
 WiFiState wifiState = WIFI_CLOSE;
 uint32_t wifiStateTs = 0;
-
-const char *ssid = "YOUR_WIFI";
-const char *password = "YOUR_PASS";
-
 const uint32_t WIFI_CONNECT_TIMEOUT = 10000;
 const uint32_t WIFI_RETRY_INTERVAL = 60000;
+const char *ssid = "LQQ";
+const char *password = "qq123456";
+const char *ntpServer = "ntp.aliyun.com";
+const long gmtOffset_sec = 8 * 3600; // 中国/台北/新加坡
+const int daylightOffset_sec = 0;
+// 获取当前时间
+void getCurrentTime();
+// 开始连接WiFi
+void startWiFiConnect();
+// WiFi 状态机
+void wifiTask();
 
-void startWiFiConnect()
+// 驱动参数
+// 转完一圈需要的脉冲数
+#define PULSE_COUNT 4096
+// 每移动一个字符所需要的脉冲数 4096 / 45
+#define PULSE_CHAR 91
+// 显示位的数量
+#define MOTOR_COUNT 5
+// 每个模块显示字符的翻牌数
+#define CHAR_COUNT 45
+// SPI 引脚（4 根）
+#define PIN_SCK 18  // 时钟信号线
+#define PIN_MOSI 23 // 驱动信号线
+#define PIN_MISO 19 // 霍尔传感器信号线
+#define PIN_CS 5    // 共用 CS
+SPIClass vspi(VSPI);
+// 步进电机半步表
+// const uint8_t stepTable[8] = {0b1000, 0b1100, 0b0100, 0b0110, 0b0010, 0b0011, 0b0001, 0b1001};
+const uint8_t stepTable[8] = {0b1001, 0b0001, 0b0011, 0b0010, 0b0110, 0b0100, 0b1100, 0b1000};
+// 步进电机在电路板上74HC595的对照表
+// const uint8_t motorTable[5][4] = {{7, 6, 5, 4}, {3, 2, 1, 15}, {14, 13, 12, 11}, {10, 9, 22, 21}, {20, 19, 18, 17}};
+const uint8_t motorTable[5][4] = {{7, 6, 5, 4}, {3, 2, 1, 15}, {14, 13, 12, 11}, {10, 9, 22, 21}, {20, 19, 18, 17}};
+// 每个脉冲之间delay的时长
+uint8_t motorSpeed = 1;
+// 电机状态
+uint8_t motorStep[MOTOR_COUNT] = {0};
+// 当前展示的文本
+int8_t currentWords[MOTOR_COUNT] = {0};
+// 准备展示的文本
+int8_t comingWords[MOTOR_COUNT] = {0};
+// 各个模块移动到指定字符所需要的脉冲数
+int needPulse[MOTOR_COUNT] = {};
+bool motorEnable[MOTOR_COUNT] = {false};
+// 霍尔传感器状态
+bool hallSensor[MOTOR_COUNT] = {false};
+// 由于安装霍尔传感器的时候需要手动掰弯元器件，所以难免会有误差，但是误差通常在一个字符之前，所以需要通过软件校准
+// 如果不知道怎么手动调整安装造成的误差，原点是0，负数表示前面的字符，正数表示后面即将显示的字符
+const int mistake[5] = {0, PULSE_CHAR - 30, 0, 0, -PULSE_CHAR + 30};
+// 霍尔传感器的检测范围，比如距离原点较近的字符，也有可能会被检测为原点
+const int hallScope = 5;
+// 校准所有模块
+bool allCalibration();
+// 把线圈全部设为低电平，防止线圈持续通电，导致电机过热
+// FIXME: 置零以后，电机的状态需要倒退一位嘛
+void stopMotor();
+// 展示指定文本
+void showWords();
+// SPI：输出 595 + 读取 165（同一时钟）
+void spiTransfer();
+// 单步推进（同步）
+void stepOnce();
+
+void setup()
 {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid, password);
+    Serial.begin(9600);
+    // WiFi.begin(ssid, password);
+    // while (WiFi.status() != WL_CONNECTED)
+    // {
+    //     delay(500);
+    //     Serial.print(".");
+    // }
+    // wifiState = WIFI_CONNECTED;
+    // configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
-    wifiState = WIFI_CONNECTING;
-    wifiStateTs = millis();
-
-    Serial.println("WiFi connecting...");
+    pinMode(PIN_CS, OUTPUT);
+    digitalWrite(PIN_CS, HIGH);
+    vspi.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS);
+    delay(500);
+    if (allCalibration())
+    {
+        Serial.println("all motors calibration succeed");
+    }
+    else
+    {
+        while (true)
+            ;
+    }
 }
 
-// WiFi 状态机
+void loop()
+{
+    // wifiTask();
+    // getCurrentTime();
+    // int temp[3][5] = {{0, 0, 0, 0, 0}, {8, 5, 12, 12, 15}, {0, 2, 18, 15, 0}};
+    int temp[3][5] = {{0, 0, 0, 0, 0}, {8, 5, 12, 12, 15}, {13, 15, 21, 19, 5}}; 
+    // 等下我发给你几个英文字母，你告诉我它们的位置，如a对应1，z对应26
+    for (int i = 0; i < 3; i++)
+    {
+        for (int j = 0; j < 5; j++)
+        {
+            comingWords[j] = temp[i][5 - 1 - j];
+        }
+        Serial.printf("%d   %d  %d  %d  %d\n", currentWords[0], currentWords[1], currentWords[2], currentWords[3], currentWords[4]);
+        showWords();
+        Serial.println(i);
+        delay(5000);
+    }
+    Serial.println("finaly circle");
+    delay(120000);
+}
+
 void wifiTask()
 {
     uint32_t now = millis();
-
     switch (wifiState)
     {
-
     case WIFI_CLOSE:
         // 需要网络时，外部切到 CONNECTING，在setup里面直接 wifiState = WIFI_CONNECTING 即可
         break;
-
     case WIFI_CONNECTING:
         if (WiFi.status() == WL_CONNECTED)
         {
@@ -93,7 +169,6 @@ void wifiTask()
             Serial.println("WiFi connect timeout, wait retry");
         }
         break;
-
     case WIFI_CONNECTED:
         if (WiFi.status() != WL_CONNECTED)
         {
@@ -102,7 +177,6 @@ void wifiTask()
             wifiStateTs = now;
         }
         break;
-
     case WIFI_WAIT_RETRY:
         if (now - wifiStateTs > WIFI_RETRY_INTERVAL)
         {
@@ -112,59 +186,145 @@ void wifiTask()
     }
 }
 
-#define MOTOR_COUNT 5
-#define CHAR_COUNT 45
-// SPI 引脚（4 根）
-#define PIN_SCK 18
-#define PIN_MOSI 23 // 74HC595
-#define PIN_MISO 19 // 74HC165
-#define PIN_CS 5    // 共用 CS
-
-const char *ssid = "LQQ";
-const char *password = "qq123456";
-
-const char *ntpServer = "pool.ntp.org";
-const long gmtOffset_sec = 8 * 3600; // 中国/台北/新加坡
-
-SPIClass vspi(VSPI);
-// 步进电机半步表
-const uint8_t stepTable[8] = {
-    0b1000, 0b1100, 0b0100, 0b0110,
-    0b0010, 0b0011, 0b0001, 0b1001};
-// 电机状态
-uint8_t motorStep[MOTOR_COUNT] = {0};
-int motorChar[MOTOR_COUNT] = {0};
-bool motorEnable[MOTOR_COUNT] = {false};
-// SPI：输出 595 + 读取 165（同一时钟）
-uint8_t spiTransfer595_165(uint32_t out595)
+void startWiFiConnect()
 {
-    uint8_t hall;
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
 
-    digitalWrite(PIN_CS, LOW);
+    wifiState = WIFI_CONNECTING;
+    wifiStateTs = millis();
 
-    vspi.transfer((out595 >> 16) & 0xFF);
-    vspi.transfer((out595 >> 8) & 0xFF);
-    hall = vspi.transfer(out595 & 0xFF);
-
-    digitalWrite(PIN_CS, HIGH);
-    return hall;
+    Serial.println("WiFi connecting...");
 }
-// 构造步进电机输出（支持断电）
-uint32_t buildMotorBits()
-{
-    uint32_t out = 0;
 
-    for (int i = 0; i < MOTOR_COUNT; i++)
+void getCurrentTime()
+{
+    struct tm timeinfo;
+    timeArr[8] = 0;
+    if (getLocalTime(&timeinfo))
     {
-        if (motorEnable[i])
+        timeArr[0] = (timeinfo.tm_mon + 1) / 10;
+        timeArr[1] = (timeinfo.tm_mon + 1) % 10;
+        timeArr[2] = timeinfo.tm_mday / 10;
+        timeArr[3] = timeinfo.tm_mday % 10;
+        timeArr[4] = timeinfo.tm_hour / 10;
+        timeArr[5] = timeinfo.tm_hour % 10;
+        timeArr[6] = timeinfo.tm_min / 10;
+        timeArr[7] = timeinfo.tm_min % 10;
+        timeArr[8] = 1;
+        if (timeinfo.tm_hour == syncHour && timeinfo.tm_mday != lastSyncDay)
         {
-            out |= (uint32_t)stepTable[motorStep[i]] << (i * 4);
+            Serial.println("sync time");
+            lastSyncDay = timeinfo.tm_mday;
+            // 连接ntp服务器校准误差
+            configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
         }
     }
-    return out;
 }
-// 单步推进（同步）
-uint8_t stepOnce()
+
+void showWords()
+{
+    // 计算各个模块移动到指定字符所需要的脉冲数
+    bool firstHall[MOTOR_COUNT], initialHall[MOTOR_COUNT];
+    // 如果当前位置的磁铁能够被检测到，那么就不能将当前位置默认为原点，起码要转转动一定的距离后才得
+    const int minPulses = hallScope * PULSE_CHAR;
+    // 记录电机的转动脉冲数
+    int rotationalPulse[5];
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        // 记录还没有开始转动的时候是不是就已经处于霍尔传感器的检测范围了，如果是，那么就不能将当前位置默认为原点，起码要转转动一定的距离后才得
+        firstHall[i] = false;
+        initialHall[i] = hallSensor[i];
+        needPulse[i] = (comingWords[i] - currentWords[i] + CHAR_COUNT) % CHAR_COUNT * PULSE_CHAR;
+        rotationalPulse[i] = 0;
+    }
+    while (needPulse[0] > 0 || needPulse[1] > 0 || needPulse[2] > 0 || needPulse[3] > 0 || needPulse[4] > 0)
+    {
+        for (int i = 0; i < MOTOR_COUNT; i++)
+        {
+            // FIXME: 如果在旋转的过程中检测到零点，需要重新计算脉冲数，以便校准
+            if (needPulse[i] > 0)
+            {
+                motorEnable[i] = true;
+                needPulse[i]--;
+                rotationalPulse[i]++;
+            }
+            else
+            {
+                motorEnable[i] = false;
+            }
+        }
+        stepOnce();
+        // 检测是否有模块在移动的过程中检测到霍尔传感器，如果检测到，那就重新计算还需要多少次脉冲
+        // 但是一个模块只有第一次检测到霍尔传感器的时候才需要校验，下一次就不校验了(一个脉冲不足以让电机脱离霍尔传感器的检测)
+        for (int i = 0; i < MOTOR_COUNT; i++)
+        {
+            // 检测到磁铁
+            if (hallSensor[i])
+            {
+                // 需要校准条件一：初始位置也检测到磁铁，但是已经转动了一定的距离
+                // 需要校准条件二：初始位置检测不到磁铁
+                if (((initialHall[i] && rotationalPulse[i] > minPulses) || initialHall[i] == false) && firstHall[i] == false)
+                {
+                    firstHall[i] = true;
+                    // 消除误差
+                    needPulse[i] = ((int)comingWords[i] * PULSE_CHAR - mistake[i] + PULSE_COUNT) % PULSE_COUNT;
+                }
+            }
+        }
+    }
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        currentWords[i] = comingWords[i];
+    }
+    stopMotor();
+}
+
+void spiTransfer()
+{
+    uint32_t out = 0;
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        hallSensor[i] = false;
+        // 不需要移动的步进电机就置零就好
+        if (motorEnable[i])
+        {
+            for (int j = 3; j >= 0; j--)
+            {
+                if (stepTable[motorStep[i]] & (1 << j))
+                {
+                    out |= (1 << motorTable[i][3 - j]);
+                }
+            }
+        }
+    }
+
+    uint8_t hall;
+    digitalWrite(PIN_CS, LOW);
+    // 好像应该获取第一个的hall吧？还是最后一个的hall
+    hall = vspi.transfer((out >> 16) & 0xFF);
+    // 第一个霍尔传感器检测到了
+    if (hall == 0)
+    {
+        hallSensor[0] = true;
+    }
+    vspi.transfer((out >> 8) & 0xFF);
+
+    vspi.transfer(out & 0xFF);
+    delay(motorSpeed);
+    digitalWrite(PIN_CS, HIGH);
+    hall = vspi.transfer(0);
+    for (int i = 0; i < 4; i++)
+    {
+        if (hall & (1 << (7 - i)))
+        {
+            continue;
+        }
+        hallSensor[i + 1] = true;
+    }
+}
+
+void stepOnce()
 {
     for (int i = 0; i < MOTOR_COUNT; i++)
     {
@@ -174,130 +334,85 @@ uint8_t stepOnce()
         }
     }
 
-    return spiTransfer595_165(buildMotorBits());
-}
-// WiFi + 时间
-void initTime()
-{
-    configTime(gmtOffset_sec, 0, ntpServer);
+    spiTransfer();
 }
 
-String getTimeStr()
+/*
+校准的时候有一个目标，就是霍尔传感器检测到磁铁的时候，磁铁最好在霍尔传感器的最右侧，就会减少造成的误差了，
+所以如果一开始就检测到磁铁，最好还是多转一圈，保证检测到磁铁的时候，是在霍尔传感器的最右侧
+*/
+bool allCalibration()
 {
-    struct tm t;
-    if (!getLocalTime(&t))
-        return "-----";
-
-    char buf[6];
-    snprintf(buf, sizeof(buf), "%02d%02d", t.tm_hour, t.tm_min);
-    return String(buf);
-}
-
-// 上电归零（霍尔校准）
-void homeAllMotors()
-{
-    memset(motorEnable, true, sizeof(motorEnable));
-
-    while (true)
+    int rotationalPulse[5];
+    int cnt = 0;
+    // 至少要转动一定的距离以后检测到磁铁才能保证此时磁铁在霍尔传感器的最右侧
+    const int minPulses = hallScope * PULSE_CHAR;
+    for (int i = 0; i < MOTOR_COUNT; i++)
     {
-        uint8_t hall = stepOnce();
-        bool done = true;
-
+        rotationalPulse[i] = 0;
+        motorEnable[i] = true;
+    }
+    while (motorEnable[0] || motorEnable[1] || motorEnable[2] || motorEnable[3] || motorEnable[4])
+    {
         for (int i = 0; i < MOTOR_COUNT; i++)
         {
-            if (hall & (1 << i))
+            // 有一个问题，就是初始化校准的时候，某个模块的磁铁在霍尔传感器的左侧，会造成误差
+            //  最好还是转一段距离，从头开始校准
+            if (hallSensor[i] && rotationalPulse[i] > minPulses)
             {
                 motorEnable[i] = false;
-                motorChar[i] = 0;
+            }
+            rotationalPulse[i]++;
+        }
+        stepOnce();
+        cnt++;
+        // 转三圈还是校准不了直接退出
+        if (cnt > PULSE_COUNT * 3)
+        {
+            return false;
+        }
+    }
+    int temp[5] = {};
+    // 消除原点误差，安装过程中无法避免的误差（掰霍尔传感器的时候手抖难免的）
+    for (int i = 0; i < MOTOR_COUNT; i++)
+    {
+        temp[i] = (PULSE_COUNT - mistake[i]) % PULSE_COUNT;
+    }
+    Serial.printf("%d   %d  %d  %d  %d\n", temp[0], temp[1], temp[2], temp[3], temp[4]);
+    while (true)
+    {
+        bool flag = false;
+        for (int i = 0; i < MOTOR_COUNT; i++)
+        {
+            if (temp[i] > 0)
+            {
+                temp[i]--;
+                motorEnable[i] = true;
+                flag = true;
             }
             else
             {
-                done = false;
+                motorEnable[i] = false;
             }
         }
-
-        delay(5);
-        if (done)
-            break;
-    }
-
-    spiTransfer595_165(0); // 全断电
-}
-// 转到指定字符（含“每圈自动校准”）
-void moveToChar(int idx, int targetChar)
-{
-    int diff = (targetChar - motorChar[idx] + CHAR_COUNT) % CHAR_COUNT;
-    motorEnable[idx] = true;
-
-    for (int i = 0; i < diff; i++)
-    {
-        motorStep[idx] = (motorStep[idx] + 1) % 8;
-        spiTransfer595_165(buildMotorBits());
-        delay(5);
-
-        motorChar[idx]++;
-        if (motorChar[idx] >= CHAR_COUNT)
+        if (flag)
         {
-            motorChar[idx] = 0;
-
-            // ===== 自动校准 =====
-            while (true)
-            {
-                uint8_t hall = spiTransfer595_165(buildMotorBits());
-                if (hall & (1 << idx))
-                    break;
-                motorStep[idx] = (motorStep[idx] + 1) % 8;
-                delay(5);
-            }
+            stepOnce();
+        }
+        else
+        {
+            break;
         }
     }
-
-    motorChar[idx] = targetChar;
-    motorEnable[idx] = false;
-    spiTransfer595_165(buildMotorBits());
+    stopMotor();
+    return true;
 }
 
-const int daylightOffset_sec = 0;
+void stopMotor()
 {
-    Serial.begin(9600);
-
-    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED)
+    for (int i = 0; i < MOTOR_COUNT; i++)
     {
-        delay(500);
-        Serial.print(".");
+        motorEnable[i] = false;
     }
-
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-}
-
-void setup() {
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\nWiFi connected");
-  Serial.begin(9600);
-
-  pinMode(PIN_CS, OUTPUT);
-  digitalWrite(PIN_CS, HIGH);
-
-  vspi.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS);
-
-  homeAllMotors();
-}
-
-
-void loop() {
-  static unsigned long last = 0;
-
-  if (millis() - last > 6000) {
-    last = millis();
-    String t = getTimeStr();
-    Serial.println(t);
-
-    // 示例：只动第 0 位
-    // moveToChar(0, random(0, 45));
-  }
+    spiTransfer();
 }
