@@ -29,9 +29,9 @@ const long gmt_offset_sec = 8 * 3600; // 东八区 秒
 const int daylight_offset_sec = 0;
 
 // 更新时间参数
-const int ONE_MINUTE = 60 * 1000;       // 1分钟的ms单位表现形式
-int refresh_time_interval = ONE_MINUTE; // 默认一分钟
-const uint8_t cost_time = 3;            // 从得到最新的时间，到展示出来所消耗的时间
+const int ONE_MINUTE = 60 * 1000;           // 1分钟的ms单位表现形式
+const uint8_t cost_time = 3;                // 从得到最新的时间，到展示出来所消耗的时间
+int refresh_time_interval = (cost_time + 1) * 60; // 开机第一次刷新时间的间隔
 
 // 时间状态
 unsigned long last_minute_trigger = 0;
@@ -109,8 +109,6 @@ void sync_ntp()
         delay(1000);
         Serial.print(".");
     }
-    // 解析获取到的时间
-    parse_time();
 }
 
 // ===================== MQTT 上报状态（带时间） =====================
@@ -122,17 +120,18 @@ void send_status(const char *status)
     char buf[128];
 
     // 使用 # 键间隔，第一个是当前展示状态,
-    snprintf(buf, sizeof(buf), "%d#%d#%s", status);
+    snprintf(buf, sizeof(buf), "%d%s", show_status, status);
 
     client.publish(pub_topic, buf);
     Serial.printf("上报: %s\n", buf);
 }
 
 // ===================== 接收 MQTT 指令 =====================
-// 0        设置为展示时间      return      00      前面的数字表示展示状态，后面的数字表示这条命令执行是否成功,0表示成功
+// 0        设置为展示时间      return      00
 // 1        设置为展示日期      return      10
 // 2HELLO   设置为展示文本      return      20      [算式的答案也是交给服务器来发吧]
 // 3        获取当前设备信息    return      0       当前的展示状态
+// 返回值讲解：前面的数字表示展示状态，后面的数字表示这条命令执行的情况,0：成功；1：当前存在指令未完成；2：步进电机转动失败
 void callback(char *topic, byte *payload, unsigned int length)
 {
     // 必须先调用，维持 MQTT 连接！
@@ -141,20 +140,13 @@ void callback(char *topic, byte *payload, unsigned int length)
     if (isBusy)
     {
         Serial.println("忙碌中，丢弃新指令");
-        send_status return; // 直接返回，不处理
+        send_status("1");
+        return; // 直接返回，不处理
     }
 
     // 不忙 → 上锁，开始处理
     isBusy = true;
     Serial.println("开始处理指令...");
-
-    // -------------------
-    // 你的指令处理代码
-    // -------------------
-
-    // 执行完 → 解锁
-    isBusy = false;
-    Serial.println("指令处理完成，解锁");
 
     char msg[length + 1];
     msg[length] = '\0';
@@ -165,18 +157,39 @@ void callback(char *topic, byte *payload, unsigned int length)
     Serial.print("收到指令: ");
     Serial.println(msg);
 
-    if (msg[0] == '1')
+    if (msg[0] == '0')
+    {
+        show_status = 0;
+        parse_time();
+    }
+    else if (msg[0] == '1')
     {
         show_status = 1;
+        parse_time();
     }
     else if (msg[0] == '2')
     {
         show_status = 2;
+        comingWords[4] = getCharPosition(msg[1]);
+        comingWords[3] = getCharPosition(msg[2]);
+        comingWords[2] = getCharPosition(msg[3]);
+        comingWords[1] = getCharPosition(msg[4]);
+        comingWords[0] = getCharPosition(msg[5]);
+    }
+
+    if (msg[0] == '3')
+    {
+        send_status("");
     }
     else
     {
-        show_status = 0;
+        send_status("0");
     }
+    // 驱动步进电机展示字符
+    showWords();
+    // 执行完 → 解锁
+    isBusy = false;
+    Serial.println("指令处理完成，解锁");
 }
 
 // ===================== 获取 N 秒后的时间 =====================
@@ -195,9 +208,9 @@ void parse_time()
     getLocalTime(&timeinfo);
     last_minute_trigger = millis();
     // 距离下一次 分钟位 变换的时间间隔
-    uint8_t refresh_interval = 60 - timeinfo.tm_sec;
+    int refresh_interval = 60 - timeinfo.tm_sec;
     // 设置下一次更新的时间间隔
-    refresh_time_interval = refresh_interval;
+    refresh_time_interval = refresh_interval * 1000;
     // 如果翻页时钟刚准备转动到准确时间，但是 分钟位 时间马上就要变换了，那么我直接转动到下一分钟
     if (refresh_interval < cost_time)
     {
@@ -206,6 +219,7 @@ void parse_time()
         // 现在我提前转动到下一个 分钟位，那么更新的时间间隔也需要加上一分钟
         refresh_time_interval += ONE_MINUTE;
     }
+    Serial.printf("%02d-%02d %02d:%02d\n", timeinfo.tm_mon, timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min);
     timeArr[0] = (timeinfo.tm_mon + 1) / 10;
     timeArr[1] = (timeinfo.tm_mon + 1) % 10;
     timeArr[2] = timeinfo.tm_mday / 10;
@@ -214,4 +228,22 @@ void parse_time()
     timeArr[5] = timeinfo.tm_hour % 10;
     timeArr[6] = timeinfo.tm_min / 10;
     timeArr[7] = timeinfo.tm_min % 10;
+    if (show_status == 0)
+    {
+        // 展示时间
+        comingWords[4] = getCharPosition(char(timeArr[4] + '0'));
+        comingWords[3] = getCharPosition(char(timeArr[5] + '0'));
+        comingWords[2] = getCharPosition(':');
+        comingWords[1] = getCharPosition(char(timeArr[6] + '0'));
+        comingWords[0] = getCharPosition(char(timeArr[7] + '0'));
+    }
+    else
+    {
+        // 展示日期
+        comingWords[4] = getCharPosition(char(timeArr[0] + '0'));
+        comingWords[3] = getCharPosition(char(timeArr[1] + '0'));
+        comingWords[2] = getCharPosition('-');
+        comingWords[1] = getCharPosition(char(timeArr[2] + '0'));
+        comingWords[0] = getCharPosition(char(timeArr[3] + '0'));
+    }
 }

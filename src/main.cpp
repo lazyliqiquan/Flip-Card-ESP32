@@ -18,12 +18,13 @@ void setup()
     Serial.begin(9600);
     // 生成唯一 clientID（多设备必备）
     sprintf(mqtt_client_id, "esp32-clock-%08X", (uint32_t)ESP.getEfuseMac());
+    Serial.println(mqtt_client_id);
     // 连接wifi
     setup_wifi();
     // 连接ntp服务器，同步当前时间
     sync_ntp();
     // 初始化mqtt服务器配置
-    init_mqtt();
+    // init_mqtt();
     // 初始化spi配置
     init_spi();
     delay(500);
@@ -43,45 +44,14 @@ void setup()
 void loop()
 {
     // 查看mqtt服务是否还保持连接
-    reconnect();
+    // reconnect();
     // 如果连接wifi失败，这里会直接跳过
-    client.loop();
+    // client.loop();
 
     // 每分钟自动触发
-    if (millis() - last_minute_trigger >= refresh_time_interval)
+    if (millis() - last_minute_trigger >= refresh_time_interval && (show_status == 0 || show_status == 1))
     {
         parse_time();
-        switch (show_status)
-        {
-        case 1:
-            // 展示日期
-            comingWords[5] = getCharPosition(char(timeArr[1] + '0'));
-            comingWords[4] = getCharPosition(char(timeArr[2] + '0'));
-            comingWords[3] = getCharPosition('-');
-            comingWords[2] = getCharPosition(char(timeArr[3] + '0'));
-            comingWords[1] = getCharPosition(char(timeArr[4] + '0'));
-            break;
-        case 0:
-            // 展示时间
-            comingWords[5] = getCharPosition(char(timeArr[4] + '0'));
-            comingWords[4] = getCharPosition(char(timeArr[5] + '0'));
-            comingWords[3] = getCharPosition(':');
-            comingWords[2] = getCharPosition(char(timeArr[6] + '0'));
-            comingWords[1] = getCharPosition(char(timeArr[7] + '0'));
-            break;
-        }
-    }
-
-    int temp[3][5] = {{0, 0, 0, 0, 0}, {8, 5, 12, 12, 15}, {13, 15, 21, 19, 5}};
-    // 等下我发给你几个英文字母，你告诉我它们的位置，如a对应1，z对应26
-    for (int i = 0; i < 3; i++)
-    {
-        for (int j = 0; j < 5; j++)
-        {
-            comingWords[j] = temp[i][5 - 1 - j];
-        }
         showWords();
-        Serial.println(i);
-        delay(5000);
     }
 }

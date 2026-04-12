@@ -22,7 +22,8 @@ bool motorEnable[MOTOR_COUNT] = {false};
 bool hallSensor[MOTOR_COUNT] = {false};
 // 由于安装霍尔传感器的时候需要手动掰弯元器件，所以难免会有误差，但是误差通常在一个字符之前，所以需要通过软件校准
 // 如果不知道怎么手动调整安装造成的误差，原点是0，负数表示前面的字符，正数表示后面即将显示的字符
-const int mistake[5] = {0, PULSE_CHAR - 30, 0, 0, -PULSE_CHAR + 30};
+// 注意：收到调节的时候，数组的最后一个误差指的是最左边的单元
+const int mistake[5] = {0, PULSE_CHAR - 30, 0, 0, -PULSE_CHAR + 20};
 // 霍尔传感器的检测范围，比如距离原点较近的字符，也有可能会被检测为原点
 const int hallScope = 5;
 // 所有展示的字符
@@ -196,7 +197,7 @@ bool allCalibration()
     {
         temp[i] = (PULSE_COUNT - mistake[i]) % PULSE_COUNT;
     }
-    Serial.printf("%d   %d  %d  %d  %d\n", temp[0], temp[1], temp[2], temp[3], temp[4]);
+    Serial.printf("每个单元的待调整误差:   %d   %d  %d  %d  %d\n", temp[0], temp[1], temp[2], temp[3], temp[4]);
     while (true)
     {
         bool flag = false;
