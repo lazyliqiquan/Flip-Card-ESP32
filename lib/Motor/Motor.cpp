@@ -1,13 +1,12 @@
 #include "Motor.h"
 
+// 定义vspi
 SPIClass vspi(VSPI);
 // 步进电机半步表
-// const uint8_t stepTable[8] = {0b1000, 0b1100, 0b0100, 0b0110, 0b0010, 0b0011, 0b0001, 0b1001};
 const uint8_t stepTable[8] = {0b1001, 0b0001, 0b0011, 0b0010, 0b0110, 0b0100, 0b1100, 0b1000};
 // 步进电机在电路板上74HC595的对照表
-// const uint8_t motorTable[5][4] = {{7, 6, 5, 4}, {3, 2, 1, 15}, {14, 13, 12, 11}, {10, 9, 22, 21}, {20, 19, 18, 17}};
 const uint8_t motorTable[5][4] = {{7, 6, 5, 4}, {3, 2, 1, 15}, {14, 13, 12, 11}, {10, 9, 22, 21}, {20, 19, 18, 17}};
-// 每个脉冲之间delay的时长
+// 每个脉冲之间delay的时长，控制转动速度的
 uint8_t motorSpeed = 1;
 // 电机状态
 uint8_t motorStep[MOTOR_COUNT] = {0};
@@ -17,6 +16,7 @@ int8_t currentWords[MOTOR_COUNT] = {0};
 int8_t comingWords[MOTOR_COUNT] = {0};
 // 各个模块移动到指定字符所需要的脉冲数
 int needPulse[MOTOR_COUNT] = {};
+// 步进电机是否可用
 bool motorEnable[MOTOR_COUNT] = {false};
 // 霍尔传感器状态
 bool hallSensor[MOTOR_COUNT] = {false};
@@ -25,7 +25,20 @@ bool hallSensor[MOTOR_COUNT] = {false};
 const int mistake[5] = {0, PULSE_CHAR - 30, 0, 0, -PULSE_CHAR + 30};
 // 霍尔传感器的检测范围，比如距离原点较近的字符，也有可能会被检测为原点
 const int hallScope = 5;
+// 所有展示的字符
+const char allChars[45] = {' ', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '*', ':', '+', '-', '?', '!', '@', '/'};
+// 把线圈全部设为低电平，防止线圈持续通电，导致电机过热
+// FIXME: 置零以后，电机的状态需要倒退一位嘛
+void stopMotor();
+void spiTransfer(); // SPI：输出 595 + 读取 165（同一时钟）
+void stepOnce();    // 单步推进（同步）
 
+void init_spi()
+{
+    pinMode(PIN_CS, OUTPUT);
+    digitalWrite(PIN_CS, HIGH);
+    vspi.begin(PIN_SCK, PIN_MISO, PIN_MOSI, PIN_CS);
+}
 
 void showWords()
 {
@@ -220,4 +233,17 @@ void stopMotor()
         motorEnable[i] = false;
     }
     spiTransfer();
+}
+
+int8_t getCharPosition(char c)
+{
+
+    for (int8_t i = 0; i < CHAR_COUNT; i++)
+    {
+        if (c == allChars[i])
+        {
+            return i;
+        }
+    }
+    return 0;
 }

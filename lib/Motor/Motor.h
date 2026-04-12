@@ -19,21 +19,10 @@
 #define PIN_CS 5    // 共用 CS
 
 extern SPIClass vspi;
-// 当前展示的文本
-extern int8_t currentWords[MOTOR_COUNT];
-// 准备展示的文本
-extern int8_t comingWords[MOTOR_COUNT];
+extern int8_t comingWords[MOTOR_COUNT]; // 准备展示的文本
 
-// 校准所有模块
-bool allCalibration();
-// 把线圈全部设为低电平，防止线圈持续通电，导致电机过热
-// FIXME: 置零以后，电机的状态需要倒退一位嘛
-void stopMotor();
-// 展示指定文本
-void showWords();
-// SPI：输出 595 + 读取 165（同一时钟）
-void spiTransfer();
-// 单步推进（同步）
-void stepOnce();
-
+void init_spi();              // 初始化spi配置
+bool allCalibration();        // 校准所有模块
+void showWords();             // 展示指定文本
+int8_t getCharPosition(char c); // 获取字符在列表中的位置
 #endif
