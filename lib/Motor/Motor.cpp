@@ -45,7 +45,7 @@ void showWords()
 {
     // 计算各个模块移动到指定字符所需要的脉冲数
     bool firstHall[MOTOR_COUNT], initialHall[MOTOR_COUNT];
-    // 如果当前位置的磁铁能够被检测到，那么就不能将当前位置默认为原点，起码要转转动一定的距离后才得
+    // 如果当前位置的磁铁能够被霍尔传感器检测到，那么就不能将当前位置默认为原点，起码要转动一定的距离后才得[处在原点检测范围内的位置不能视为原点]
     const int minPulses = hallScope * PULSE_CHAR;
     // 记录电机的转动脉冲数
     int rotationalPulse[5];
@@ -57,6 +57,7 @@ void showWords()
         needPulse[i] = (comingWords[i] - currentWords[i] + CHAR_COUNT) % CHAR_COUNT * PULSE_CHAR;
         rotationalPulse[i] = 0;
     }
+    // 所有模块的相对位置都转动完成，才可以停止
     while (needPulse[0] > 0 || needPulse[1] > 0 || needPulse[2] > 0 || needPulse[3] > 0 || needPulse[4] > 0)
     {
         for (int i = 0; i < MOTOR_COUNT; i++)
@@ -122,7 +123,8 @@ void spiTransfer()
     digitalWrite(PIN_CS, LOW);
     // 好像应该获取第一个的hall吧？还是最后一个的hall
     hall = vspi.transfer((out >> 16) & 0xFF);
-    // 第一个霍尔传感器检测到了
+    // FIXME: 第一个霍尔传感器检测到了【按电路设计来说，应该是发送完驱动脉冲以后，才去获取霍尔传感器的状态】
+    // FIXME: 所以有可能是这里导致产生转动误差
     if (hall == 0)
     {
         hallSensor[0] = true;
@@ -132,7 +134,8 @@ void spiTransfer()
     vspi.transfer(out & 0xFF);
     delay(motorSpeed);
     digitalWrite(PIN_CS, HIGH);
-    hall = vspi.transfer(0);
+    // FIXME: 应该是在这里获取所有霍尔传感器的状态才对
+    hall = vspi.transfer(0); // 发送无效数据，从而获取从机回传的霍尔传感器数据
     for (int i = 0; i < 4; i++)
     {
         if (hall & (1 << (7 - i)))
@@ -149,10 +152,10 @@ void stepOnce()
     {
         if (motorEnable[i])
         {
+            // 切换下一个脉冲序列,8个脉冲为一个周期
             motorStep[i] = (motorStep[i] + 1) % 8;
         }
     }
-
     spiTransfer();
 }
 
@@ -162,13 +165,12 @@ void stepOnce()
 */
 bool allCalibration()
 {
-    int rotationalPulse[5];
+    // 记录所有模块中最多的转动脉冲数
     int cnt = 0;
     // 至少要转动一定的距离以后检测到磁铁才能保证此时磁铁在霍尔传感器的最右侧
     const int minPulses = hallScope * PULSE_CHAR;
     for (int i = 0; i < MOTOR_COUNT; i++)
     {
-        rotationalPulse[i] = 0;
         motorEnable[i] = true;
     }
     while (motorEnable[0] || motorEnable[1] || motorEnable[2] || motorEnable[3] || motorEnable[4])
@@ -177,11 +179,10 @@ bool allCalibration()
         {
             // 有一个问题，就是初始化校准的时候，某个模块的磁铁在霍尔传感器的左侧，会造成误差
             //  最好还是转一段距离，从头开始校准
-            if (hallSensor[i] && rotationalPulse[i] > minPulses)
+            if (hallSensor[i] && cnt > minPulses)
             {
                 motorEnable[i] = false;
             }
-            rotationalPulse[i]++;
         }
         stepOnce();
         cnt++;
@@ -191,21 +192,23 @@ bool allCalibration()
             return false;
         }
     }
-    int temp[5] = {};
+    // 还需要转动的脉冲数
+    int needPulse[5] = {};
     // 消除原点误差，安装过程中无法避免的误差（掰霍尔传感器的时候手抖难免的）
     for (int i = 0; i < MOTOR_COUNT; i++)
     {
-        temp[i] = (PULSE_COUNT - mistake[i]) % PULSE_COUNT;
+        needPulse[i] = (PULSE_COUNT - mistake[i]) % PULSE_COUNT;
     }
-    Serial.printf("每个单元的待调整误差:   %d   %d  %d  %d  %d\n", temp[0], temp[1], temp[2], temp[3], temp[4]);
+    Serial.printf("每个单元的待调整误差:   %d   %d  %d  %d  %d\n", needPulse[0], needPulse[1], needPulse[2], needPulse[3], needPulse[4]);
     while (true)
     {
+        // 是否还有模块需要调整
         bool flag = false;
         for (int i = 0; i < MOTOR_COUNT; i++)
         {
-            if (temp[i] > 0)
+            if (needPulse[i] > 0)
             {
-                temp[i]--;
+                needPulse[i]--;
                 motorEnable[i] = true;
                 flag = true;
             }

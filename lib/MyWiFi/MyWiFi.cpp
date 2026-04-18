@@ -16,8 +16,8 @@ const char *mqtt_pass = "lazyman";
 char mqtt_client_id[50];
 
 // MQTT 主题
-const char *sub_topic = "clock/control"; // 接收指令
-const char *pub_topic = "clock/status";  // 上报状态
+const char *sub_topic = "clock/control/liqiquan"; // 接收指令
+const char *pub_topic = "clock/liqiquan/status";  // 上报状态
 
 // mqtt客户端实例化
 WiFiClient espClient;
@@ -29,9 +29,9 @@ const long gmt_offset_sec = 8 * 3600; // 东八区 秒
 const int daylight_offset_sec = 0;
 
 // 更新时间参数
-const int ONE_MINUTE = 60 * 1000;           // 1分钟的ms单位表现形式
-const uint8_t cost_time = 3;                // 从得到最新的时间，到展示出来所消耗的时间
-int refresh_time_interval = (cost_time + 1) * 60; // 开机第一次刷新时间的间隔
+const int ONE_MINUTE = 60 * 1000;                 // 1分钟的ms单位表现形式
+const uint8_t cost_time = 3;                      // 从得到最新的时间，到展示出来所消耗的时间
+int refresh_time_interval = (cost_time + 2) * 60; // 开机第一次刷新时间的间隔
 
 // 时间状态
 unsigned long last_minute_trigger = 0;
@@ -61,6 +61,7 @@ void setup_wifi()
 void init_mqtt()
 {
     client.setServer(mqtt_server, mqtt_port);
+    // 设置回调函数，订阅服务端发布的消息
     client.setCallback(callback);
 }
 
@@ -103,9 +104,9 @@ void sync_ntp()
     // 官方原生 configTime，来自 <time.h> 系统库
     configTime(gmt_offset_sec, daylight_offset_sec, ntp_server);
     struct tm timeinfo;
+    // 至少需要同步成功一次才能跳出循环
     while (!getLocalTime(&timeinfo))
     {
-
         delay(1000);
         Serial.print(".");
     }
@@ -117,9 +118,9 @@ void send_status(const char *status)
     if (!client.connected())
         return;
 
-    char buf[128];
+    // 注意不要溢出
+    char buf[32];
 
-    // 使用 # 键间隔，第一个是当前展示状态,
     snprintf(buf, sizeof(buf), "%d%s", show_status, status);
 
     client.publish(pub_topic, buf);
@@ -183,6 +184,7 @@ void callback(char *topic, byte *payload, unsigned int length)
     }
     else
     {
+        // 这里只是返回指令确实被安排执行的意思，但是不一定正确执行
         send_status("0");
     }
     // 驱动步进电机展示字符
@@ -206,12 +208,13 @@ void parse_time()
 {
     struct tm timeinfo;
     getLocalTime(&timeinfo);
+    // 记录当前更新时间的时刻
     last_minute_trigger = millis();
     // 距离下一次 分钟位 变换的时间间隔
     int refresh_interval = 60 - timeinfo.tm_sec;
     // 设置下一次更新的时间间隔
     refresh_time_interval = refresh_interval * 1000;
-    // 如果翻页时钟刚准备转动到准确时间，但是 分钟位 时间马上就要变换了，那么我直接转动到下一分钟
+    // 如果翻页时钟刚准备转动到准确时间，但是 分钟位 时间马上就要变换了，那么直接转动到下一分钟
     if (refresh_interval < cost_time)
     {
         // 获取下一分钟的时间
