@@ -132,7 +132,7 @@ void send_status(const char *status)
 // 1        设置为展示日期      return      10
 // 2HELLO   设置为展示文本      return      20      [算式的答案也是交给服务器来发吧]
 // 3        获取当前设备信息    return      0       当前的展示状态
-// 返回值讲解：前面的数字表示展示状态，后面的数字表示这条命令执行的情况,0：成功；1：当前存在指令未完成；2：步进电机转动失败
+// 返回值讲解：前面的数字表示展示状态，后面的数字表示这条命令执行的情况,0：成功；1：当前存在指令未完成；2：步进电机转动失败(FIXME: 还没实现反馈转动失败的功能)
 void callback(char *topic, byte *payload, unsigned int length)
 {
     // 必须先调用，维持 MQTT 连接！
