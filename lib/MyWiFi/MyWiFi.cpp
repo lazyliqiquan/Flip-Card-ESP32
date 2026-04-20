@@ -130,8 +130,9 @@ void send_status(const char *status)
 // ===================== 接收 MQTT 指令 =====================
 // 0        设置为展示时间      return      00
 // 1        设置为展示日期      return      10
-// 2HELLO   设置为展示文本      return      20      [算式的答案也是交给服务器来发吧]
-// 3        获取当前设备信息    return      0       当前的展示状态
+// 2HELLO   设置为展示文本      return      20
+// 312+19   设置为展示文本      return      30      [算式的答案交给服务器来发吧]
+// 4        获取当前设备信息    return      0       当前的展示状态
 // 返回值讲解：前面的数字表示展示状态，后面的数字表示这条命令执行的情况,0：成功；1：当前存在指令未完成；2：步进电机转动失败(FIXME: 还没实现反馈转动失败的功能)
 void callback(char *topic, byte *payload, unsigned int length)
 {
@@ -168,9 +169,9 @@ void callback(char *topic, byte *payload, unsigned int length)
         show_status = 1;
         parse_time();
     }
-    else if (msg[0] == '2')
+    else if (msg[0] == '2' || msg[0] == '3')
     {
-        show_status = 2;
+        show_status = msg[0] - '0';
         comingWords[4] = getCharPosition(msg[1]);
         comingWords[3] = getCharPosition(msg[2]);
         comingWords[2] = getCharPosition(msg[3]);
@@ -178,7 +179,7 @@ void callback(char *topic, byte *payload, unsigned int length)
         comingWords[0] = getCharPosition(msg[5]);
     }
 
-    if (msg[0] == '3')
+    if (msg[0] == '4')
     {
         send_status("");
     }
